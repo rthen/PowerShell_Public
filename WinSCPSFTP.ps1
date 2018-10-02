@@ -6,7 +6,7 @@ To get started:
 1-Install WinSCP app
 2-Install WinSCP .NET module. It is Required to interact with the WinSCP networking commands along with PowerShell
 
-If script fails at importing the .dll, right click the .dll--> click properties-->unblock .dll(If blocked)-->if blocked, unblock, signout and sign in again
+If the script fails at importing the .dll, right click the .dll--> click properties-->unblock .dll(If blocked)-->if blocked, unblock, signout and sign in again
 #>
 Add-Type -Path "C:\Program Files (x86)\WinSCP\WinSCPnet.dll" # Loads .NET module
 $ErrorActionPreference = "Stop"  # Allows 'catch' to work
