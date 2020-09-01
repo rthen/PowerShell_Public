@@ -60,32 +60,36 @@ function LogIt{
    }
 } 
 
-function SendEmailNotification($hostname, $errormessage){ # Send email notification if error occurs.
+function SendEmailNotification($hostname, $ErrMessage){ # Send email notification if error occurs.
     <#
     .DESCRIPTION
         Function that sends email alerts to one or more email address using a local or hosted SMTP relay server
     #>
-    try{
-        $noParams = @{
-            Body = @"
-                    <img src="OPTIONAL_IMAGE OF COMPANY LOGO">
-                    <p>$errormessage
-                    <p>Please view 'OPTIONAL_LOG PATH' for further troubleshooting.
-                
-"@ 
-            Subject = "Failed to transfer files to $hostname"
-            From = "FROM_ADDRESS" # CHANGE
-            To = @("TO_ADDRESS", "TO_ADDRESS") # Array if wanting to send email to more than one user
-            SmtpServer = "RELAY_SERVER" # CHANGE
-        }
-        Send-MailMessage @noParams -BodyAsHtml
-    LogIt -message "Sent TO_WHOM notification" -component ("SendEmailNotification:55") -type Warning
-    }catch{
-        Logit -message "Failed to send TO_WHOM notification" -component ("SendEmailNotification:55") -type Warning
-    }
+    $SMTPServer = "SMTP_SERVER" # CHANGE
+    $SMTPClient = New-Object System.Net.Mail.SmtpClient($SMTPServer)
+    $emailMsg = New-Object System.Net.Mail.MailMessage
+    $emailMsg.To.Add("TO_ADDRESS") # CHANGE
+    $emailMsg.From = "FROM@DOMAIN" # CHANGE
+    $emailMsg.IsBodyHtml = $true
+    $attachment = New-Object System.Net.Mail.Attachment -ArgumentList "PATH\TO\IMAGE" # CHANGE
+    $attachment.ContentDisposition.Inline = $true
+    $attachment.ContentDisposition.DispositionType = "Inline"
+    $attachment.ContentType.MediaType = "image/png"
+    $attachment.ContentId = "IMAGE_NAME.png" # CHANGE
+    $emailMsg.Attachments.add($attachment)
+
+    $emailMsg.Body = @"
+    <img id="IMAGE_NAME" src='cid:IMAGENAME.png' alt=''>
+    <p> ADD CUSTOM MESSAGE
+"@ # CHANGE
+    $emailMsg.Subject = "CUSTOM SUBJECT" # CHANGE
+    $SMTPClient.send($emailMsg)
+    $attachment.Dispose();
+    $emailMsg.Dispose();
+    LogIt -message ("Error ocurred with the script, sending EMAIL@DOMAIN an email notification") -component SendEmailNotification -type Info
 }
 
-function UploadFiles($hostname, $username, $source_location, $dest_location, $key){ # KEY REQUIRED
+function UploadFiles($hostname, $username, $source_location, $dest_location, $KeyFingerPrint){ # KEY REQUIRED
     <#
     .DESCRIPTION
         Copies given files from one location to a remote server through SFTP. Must provide 4 arguments to the function:
@@ -95,22 +99,19 @@ function UploadFiles($hostname, $username, $source_location, $dest_location, $ke
             4-The full path where the files will be copied to
     #>
      try{
-        if (Test-Path $source_location){
-            LogIt -message ("File(s) found. Starting SFTP transfer") -component "UploadFiles:72" -type Info
-
             $sessionOptions = New-Object WinSCP.SessionOptions -Property @{ # Values submitted to WinScp
                 Protocol = [WinSCP.Protocol]::Sftp
                 HostName = $hostname
                 Username = "USERNAME" # CHANGE
                 SecurePassword = Get-Content "PATH_OF_HASHED_PASSWORD" | ConvertTo-SecureString # CHANGE
-                SshHostKeyFingerprint = $key 
+                SshHostKeyFingerprint = $KeyFingerPrint 
             }
     
             try{ # Creates connection
                 $session = New-Object WinSCP.Session
                 $session.SessionLogPath = "PATH_TO_LOG_FILE" # CHANGE
                 $session.Open($sessionOptions)
-                LogIt -message ("Opening SFTP session") -component "UploadFiles:89" -type Info
+                LogIt -message ("Opening SFTP session") -component "UploadFiles:112" -type Info
 
                 $transferOptions = New-Object WinSCP.TransferOptions
                 $transferOptions.TransferMode = [WinSCP.TransferMode]::Binary
@@ -121,12 +122,8 @@ function UploadFiles($hostname, $username, $source_location, $dest_location, $ke
                 
             }finally{    
                 $session.Dispose() # Closes connection whether file was sucessfully transferred or not
-                LogIt -message ("Closing SFTP session: $Session") -component "UploadFiles:101" -type Info
+                LogIt -message ("Closing SFTP session: $Session") -component "UploadFiles:123" -type Info
             }
-            
-        }else{ # Do nothing if no files were found
-            LogIt -message ("No files found to transfer, skipping....") -component "UploadFiles:100" -type Info
-        }
     }catch{
             $errormessage = "<b>The following error has ocurred:</b> <p>`n$_.Exception.Message"
             SendEmailNotification $hostname $errormessage
@@ -135,22 +132,33 @@ function UploadFiles($hostname, $username, $source_location, $dest_location, $ke
 }
 
 <#
-UploadFiles "SERVER_ADDRESS OR NAME" "USERNAME" "SOURCE FILE/PATH" "DESTINATION PATH" "PUBLIC SSH KEY".
-If no ssh key fingerprint available, set 'GiveUpSecurityAndAcceptAnySshHostKey = "$true"' on $sessionOptions
+    UploadFiles "SERVER_ADDRESS OR NAME" "USERNAME" "SOURCE FILE/PATH" "DESTINATION PATH" "PUBLIC SSH KEY".
+    If no ssh key fingerprint available, set 'GiveUpSecurityAndAcceptAnySshHostKey = "$true"' on $sessionOptions
 #>
+$datafeed = "PATH_OF_FILES_TO_MOVE"
+if (Test-Path -Path $datafeed){
+    UploadFiles "SERVER_ADDRESS" "USERNAME" $datafeed "REMOTE_PATH" "SSH_KEY_FINGERPRINT"
+}else{
+    LogIt -message ("File(s) not found. Skipping SFTP transfer....") -component "SFTP_Connection.ps1" -type Info
+}
 
-UploadFiles "SERVER_ADDRESS" "USERNAME" "PATH_OF_FILES_TO_MOVE" "REMOTE_PATH" 'SSH_KEY_FINGERPRINT'
+$ArchiveFolderPath = "PATH_TO_ARCHIVE_FOLDER"
 
+# Checks archive folder and deletes files older than 180 days
+Try{
+    Get-ChildItem -Path $ArchiveFolderPath -Recurse | Where-Object LastWriteTime -lt (Get-Date).AddDays(-180) | Remove-Item -Force
+    LogIt -message ("#" * 200) -component " " -type INFO
+    LogIt -message ("Deleting archived files older than 180 days ") -component "SFTP_Connection:151" -type INFO
+}Catch{
+    LogIt -message ("Failed to delete files in the archive folder of 180 days older or more") -component "SFTP_Connection:168" -type ERROR
+}
 
-$LogFile = "PATH_TO_LOG_FILE"
-$MaxLogSizeInKB = 10000
-
-# If SFTPOperation.log greater than 1000KB, let's rename it and use a new .log file
-try{
-    if ((Get-Item $LogFile).Length/1KB -gt $MaxLogSizeInKB){
-        $log = $LogFile
-        Rename-Item $LogFile ($log.Replace(".log", "_ROTATED_" + (Get-Date).ToString('MMddyyhhmm') + ".log")) -Force
-    }
-}catch{
-    LogIt -message ("WinScpperational.log file cannot be renamed. Either the file does not exists or another process is using it") -component "SFTP_Connection.ps1:125" -type Warning
+# Checks log folder and deletes files older than 180 days
+$LogFileFolder = "PATH_TO_LOG_FOLDER"
+Try{
+     Get-ChildItem -Path $LogFileFolder -Recurse | Where-Object LastWriteTime -lt (Get-Date).AddDays(-180) | Remove-Item -Force
+     LogIt -message ("Deleting log files older than 180 days ") -component "SFTP_Connection:161" -type INFO
+     LogIt -message ("#" * 200) -component " " -type INFO
+ }Catch{
+     LogIt -message ("Failed to delete files in the archive folder of 180 days older or more") -component "SFTP_Connection:161" -type ERROR
  }
