@@ -66,6 +66,7 @@ function SendEmailNotification($hostname, $ErrMessage){ # Send email notificatio
     .DESCRIPTION
         Function that sends email alerts to one or more email address using a local or hosted SMTP relay server
     #>
+
     $SMTPServer = "SMTP_SERVER" # CHANGE
     $SMTPClient = New-Object System.Net.Mail.SmtpClient($SMTPServer)
     $emailMsg = New-Object System.Net.Mail.MailMessage
