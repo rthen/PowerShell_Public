@@ -8,6 +8,7 @@ To get started:
 
 If the script fails at importing the .dll, right click the .dll--> click properties-->unblock .dll(If blocked)-->if blocked, unblock, signout and sign in again
 #>
+
 Add-Type -Path "C:\Program Files (x86)\WinSCP\WinSCPnet.dll" # Loads .NET module
 $ErrorActionPreference = "Stop"  # Allows 'catch' to work
 
