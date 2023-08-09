@@ -1,6 +1,6 @@
 <#
-	Script that checks if device has supported TPM, and if so, enables BitLocker. 
-  If BitLocker is enabled, it will sync key up to Azure AD. This script is meant to be executed in Intune as a remediation script.
+   Script that checks if device has supported TPM, and if so, enables BitLocker. 
+   If BitLocker is enabled, it will sync key up to Azure AD. This script is meant to be executed in Intune as a remediation script.
 #>
 $ErrorActionPreference = "Stop"
 
