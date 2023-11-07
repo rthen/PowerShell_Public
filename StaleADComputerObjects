@@ -1,0 +1,85 @@
+<#
+	Script searches for local stale computer objects. The staled computed objects found are then checked against Entra ID (formerly known as Azure AD)
+	to collect additional information in the event the computer belongs to an employee who is remote and is utilizing Intune or similar services instead of local AD
+#>
+
+# Connect-AzureAD
+
+$Date = Get-Date -Format "%Hmm_%Mddyyyy"
+$StaleADComputers = Search-ADAccount -AccountInActive -ComputersOnly -TimeSpan 365:00:00:00 -ResultPageSize 2000 -ResultSetSize $null | ?{$_.Enabled -eq $True}  | Select-Object Name, SamAccountName, DistinguishedName, LastLogonDate
+$StaleADComputersCount = $StaleADComputers.count
+$Total = 1
+$StalesADComputersActivityResults = @()
+
+foreach ($computer in $StaleADComputers){
+    Write-Host ("-" * 100) -ForegroundColor Yellow
+	$Name = $computer.name
+    Write-Host "Checking $Name $Total / $StaleADComputersCount"
+	$SamAccountName = $computer.SamAccountName
+	$LastLocalADLogonDate = $computer.LastLogonDate
+	$PasswordLastSet = (Get-ADComputer -Identity $Name -Properties PasswordLastSet).PasswordLastSet
+
+	$AzureObjectIDs = Get-AzureADDevice -SearchString $name
+
+    # Default values in the event the object cannot be found in Entra ID
+    $DeviceOSType = "No data found in Azure"
+	$DeviceOSVersion = "No data found in Azure"
+	$DeviceTrustType = "No data found in Azure"
+	$DirSyncEnabled = "No data found in Azure"
+	$IsManaged = "No data found in Azure"
+	$ProfileType = "No data found in Azure"
+	$ApproximateLastLogonTimeStamp = "No data found in Azure"
+	$LastDirSyncTime = "No data found in Azure"
+	$RegisteredOwner = "No data found in Azure"
+	$RegisteredUser = "No data found in Azure"
+
+	if ($AzureObjectIDs){
+        <#
+            It is possible for Azure to have multiple computer objects with the same name. As a result, the objects are added to a hashtable,
+            and sorted based on the value to select the 'ObjectID' of the computer with the most recent 'ApproximateLastLogonTimeStamp' value.
+        #>
+
+		if ($AzureObjectIDs.count -gt 1){
+			$ComputerObjectIDs = @{}
+            
+			foreach ($device in $AzureObjectIDs){
+				$ComputerObjectIDs[$device.ObjectID] = $device.ApproximateLastLogonTimeStamp	
+			}
+			$AzureObjectID = (($ComputerObjectIDs.GetEnumerator() | Sort-Object Value -Descending )[0] | Select Name).Name
+		}else{
+			$AzureObjectID = $AzureObjectIDs.ObjectID
+		}
+
+		$AzureDevice = Get-AzureADDevice -ObjectID $AzureObjectID
+		$DeviceOSType = $AzureDevice.DeviceOSType
+		$DeviceOSVersion = $AzureDevice.DeviceOSVersion
+		$DeviceTrustType = $AzureDevice.DeviceTrustType
+		$DirSyncEnabled = $AzureDevice.DirSyncEnabled
+		$IsManaged = $AzureDevice.IsManaged
+		$ProfileType = $AzureDevice.ProfileType
+		$ApproximateLastLogonTimeStamp = $AzureDevice.ApproximateLastLogonTimeStamp
+		$LastDirSyncTime = $AzureDevice.LastDirSyncTime
+		$RegisteredOwner = (Get-AzureADDeviceRegisteredOwner -ObjectId $AzureObjectID | select UserPrincipalName).UserPrincipalName
+		$RegisteredUser = (Get-AzureADDeviceRegisteredUser -ObjectId $AzureObjectID | select UserPrincipalName).UserPrincipalName
+	}
+
+	$StalesADComputersActivityResults += New-Object psobject -Property @{
+		"ComputerName" = $Name
+		"ComputerSamAccountName" = $SamAccountName
+		"LocalAD_PasswordLastSet" = $PasswordLastSet
+		"LocalAD_LastLogonDate" = $LastLocalADLogonDate
+		"AzureAD_DeviceOSType" = $DeviceOSType
+		"AzureAD_DeviceOSVersion" = $DeviceOSVersion
+		"AzureAD_DeviceTrustType" = $DeviceTrustType
+		"DirSyncEnabled" = $DirSyncEnabled
+		"AzureAD_IsManaged" = $IsManaged
+		"AzureAD_ProfileType" = $ProfileType
+		"AzureAD_ApproximateLastLogonTimeStamp" = $ApproximateLastLogonTimeStamp
+		"LastDirSyncTime" = $LastDirSyncTime
+		"AzureAD_RegisteredOwner" = $RegisteredOwner
+		"AzureAD_RegisteredUser" = $RegisteredUser
+	}
+    $Total++
+}
+
+$StalesADComputersActivityResults | Export-Csv -Path StaleADComputers_AzureActivity_$Date.csv -NoTypeInformation
