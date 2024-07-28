@@ -1,118 +1,132 @@
 <#
-  Script connects to MS Graph API, Exchange online, and local AD to retrieve activity related data for accounts. 
-  This script can check things such as the last sign in history within Azure or local AD, which can be useful at identifying ghost accounts
+    This script collects information from AD such as last logon date, Azure last successful sign in (interactive / non-interactive).
+    Then the results are exported into a .CSV file. The script can be easily modified to ingest data from a .csv file or similar. End goal is 
+    to identify inactive accounts. 
 #>
-try{    
-    Connect-ExchangeOnline -ShowBanner:$false # Module used to pull Exchange online related information
-}catch{
-    $Err = $Error[0] | Out-String
-    Write-Host "Error connecting to Exchange Online: $Err" -ForegroundColor Red
-    Exit 1
+
+Write-Host ("-" * 100)
+$ADUserssActivitiesResults = @()
+
+# Global variable to keep track of when the access token will expire
+$Global:BearerTokenExpiration = $null
+
+function ConnectMgGraph (){
+    # Read-only permission to MS Graph API
+    $ClientSecret = "[CLIENT_SECRET]"
+    $ClientID = "[CLIENT_ID]"
+    $TentantID = "[TENANT_ID]"
+    $scope = "https://graph.microsoft.com/.default"  # or any other resource URL you need
+    $tokenEndpoint = "https://login.microsoftonline.com/$TentantID/oauth2/v2.0/token"
+
+    # Define the body of the request
+    $body = [Ordered] @{
+        grant_type    = "client_credentials"
+        client_id     = $clientID
+        client_secret = $clientSecret
+        scope      = $scope
+    }
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::tls12
+    # Send the request to get the token
+    try{
+        $response = Invoke-RestMethod -Uri $tokenEndpoint -Method POST -Body $body
+        Write-Host "Bearer token successfully retrieved"
+    }catch{
+        $CustomErrMessage = "The [SCRIPT_NAME].ps1 script failed to retrieve a bearer token to authenticate to the MS Graph API. The following error has occured:"
+        $PSErrMessage = $Error[0]
+        
+        Write-Host "Unable to retrieve bearer token. Error: $PSErrMessage"
+        Exit 1
+    }
+
+    # Extract the access token from the response
+    $accessToken = $response.access_token
+    $parts = $accessToken -split '\.'
+
+    # Convert JWT token into a format that can be converted to JSON, allowing the script to retrieve the token's expiration time
+    if ($parts.Length -ne 3) {
+        $CustomErrMessage = "The [SCRIPT_NAME].ps1 script failed to retrieve access token expiration date. The JWT token format isn't proper"
+        $PSErrMessage = $Error[0]
+        
+        Write-Host "Unable to retrieve access token expiration date, JWT token not in the correct format"
+        Exit 1
+    }
+
+    $base64Url = $parts[1]
+    $base64 = $base64Url.Replace('_', '/').Replace('-', '+')
+
+    switch ($base64.Length % 4) {
+        2 { $base64 += '==' }
+        3 { $base64 += '=' }
+    }
+
+    $jwtToJson = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($base64))
+    $jwtFromJson = $jwtToJson | ConvertFrom-Json
+    # Set a global variable with the bearer access token expiration, which will be checked in the 'for' loop below to see if it expires, and if so, refresh it
+    $global:BearerTokenExpiration = ([System.DateTimeOffset]::FromUnixTimeSeconds($jwtFromJson.exp)).LocalDateTime
+    Write-Host "Access token will expire on $BearerTokenExpiration"
+
+    $securedAccesToken = $accessToken | ConvertTo-SecureString -AsPlainText -Force
+
+    try{
+        Connect-MgGraph -AccessToken $securedAccesToken -NoWelcome
+        Write-Host "Successfully connected to MS Graph API"
+    }catch{
+        $CustomErrMessage = "The [SCRIPT_NAME].ps1 script failed to launch the <b>Connect-MgGraph</b> cmdlet. The following error has occured:"
+        $PSErrMessage = $Error[0]
+        
+        Write-Host "Unable to connect to MS Graph API. Error: $PSErrMessage"
+        Exit 1
+    }
 }
+
+# Call function to connect to MS Graph API
+ConnectMgGraph
 
 try{
-    Write-Host "***** Connecting to MS Graph API *****" -ForegroundColor Yellow
-    $ClientID = '[CLIENT_ID]'
-    $TentantID = '[TENTANT_ID]'
-    $SelfSignedCertThumbprint = "[CERT_THUMBPRINT]" # Self signed certificate located on personal cert store
-
-    Connect-MgGraph -ClientID $ClientID -TenantId $TentantID -CertificateThumbprint $SelfSignedCertThumbprint
-    Select-MgProfile -Name "beta" # SignIn filtering data is currently in beta, so script must connect to such profile
-
+    $GroupName =  Get-ADGroup -Identity "[GROUP_NAME]" -Properties Member | Select-Object -ExpandProperty Member | Get-ADUser -Properties SamAccountName, EmployeeID, PasswordExpired, PasswordLastSet, LastLogonDate
+    Write-Host "Successfully retrieved members of the '[GROUP_NAME]' group"
 }catch{
-    $Err = $Error[0] | Out-String
-    Write-Host "Error connecting to MS Graph API: $Err" -ForegroundColor Red
-    Exit 1
+    $CustomErrMessage = "The [SCRIPT_NAME].ps1 script failed to retrieve members of the '[GROUP_NAME]' group. The following error has occured:"
+    $PSErrMessage = $Error[0] | Out-String
+    
+    Write-Host "Unable to retrieve members of '[GROUP_NAME]' group. Error: $PSErrMessage"
 }
 
-[System.Collections.ArrayList]$ActivityResults = @()
-Write-Host "***** Retrieving all users from local Active Directory, please wait... *****" -ForegroundColor Yellow
-$LocalADInfo = Get-ADUser -Filter * -Properties GivenName, Surname, EmployeeID, Description, LastLogonDate, Enabled, PasswordExpired, DistinguishedName, UserPrincipalName, PasswordLastSet, SamAccountName
-$Total = 1
-$LocalADInfoCount = $LocalADInfo.count
-$ErrorActionPreference = "Stop"
+Write-Host "Retrieving AD data and checking default password for users"
+Write-Host "Checking information for $($GroupName.count) users"
 
-foreach ($ADObject in $LocalADInfo){
-    Write-Host ("#" * 100) -ForegroundColor Green
-    
-    $UPN = $ADObject.UserPrincipalName
-    $GivenName = $ADObject.GivenName
-    $Surname = $ADObject.Surname
-    $EmployeeID = $ADObject.EmployeeID
-    $Description = $ADObject.Description
-    $LastLogonDate = $ADObject.LastLogonDate
-    $Enabled = $ADObject.Enabled
-    $PasswordExpired = $ADObject.PasswordExpired
-    $DistinguishedName = $ADObject.DistinguishedName
-    $PasswordLastSet = $ADObject.PasswordLastSet
-    $SamAccountName = $ADObject.SamAccountName
+foreach ($ADUsers in $GroupName){
+    $DS = New-Object System.DirectoryServices.AccountManagement.PrincipalContext('domain')
+    # If token will expire within the next 5 minutes, call ConnectMgGraph function to request a new ones
+    $BearerTokenTimeMinutesLeft = ($BearerTokenExpiration - (Get-Date)).Minutes
 
-    # EOL and Azure attributes will be set to none at first, and updated later on if such information is available
-    $EOLLastInteractionTime = "None"
-    $EOLLastLogonTime = "None"
-    $EOLLastUserAccessTime = "None"
-    $EOLLastUserActionTime = "None"
-    $AzureLastNonInteractiveSignInDateTime = "None" 
-    $AzureLastSignInDateTime = "None"
+    if ($BearerTokenTimeMinutesLeft -lt 5){
+        Write-Host "-" * 100
+        Write-Host "Access bearer token expiring within 5 minutes, refreshing token"
+        ConnectMgGraph
+        Write-Host "Access token refreshed"
+        Write-Host "-" * 100
+    }
 
-    # User's with an UPN of '@doman.com' will be switched in Azure to have an UPN of '@domain.com'. Although unlikely that there is a sign in
-    # history for such accounts in Azure since they are mostly for service accounts, still worth checking it out.
-    if ($UPN -like "*@DOMAIN.COM"){
-        $UPN = ($UPN -split "@")[0] + "@domain.com"
-    }elseif ($UPN -eq $null){
-        # Some accts such as krbtgt does not have an UPN, so UPN will be empty.
-        # Running Get-MgUser against empty string will error out, even if in a try/catch when running as a script.
-        $UPN = "NullNull"
-    }
-    
-    Write-Host "Checking $UPN (UPN) - $SamAccountName (SamAccountName) - $Total / $LocalADInfoCount" -ForegroundColor Yellow
-    try{
-        $MailboxStats = Get-MailboxStatistics -Identity $UPN -ErrorAction "Stop" | Select-Object LastInteractionTime, LastLogonTime, LastUserAccessTime, LastUserActionTime
-        $EOLLastInteractionTime = $MailboxStats.LastInteractionTime
-        $EOLLastLogonTime = $MailboxStats.LastLogonTime
-        $EOLLastUserAccessTime = $MailboxStats.LastUserAccessTime
-        $EOLLastUserActionTime = $MailboxStats.LastUserActionTime
-    }catch{
-        Write-Host "Account does not have an active mailbox" -ForegroundColor Red
-    }
-    
-    try{
-        $AzureLastSignIn = Get-MgUser -Filter "startswith(UserPrincipalName, '$UPN')" -Select SignInActivity | Select-Object -ExpandProperty SignInActivity
-    }catch{
-        Write-Host "Unable to find account in Azure" -ForegroundColor Red
-    }
-    # It's possible the UPN might be on a different format, or the account isn't being synced over to Azure AD. This checks if anything is returned, even if the dates are empty
-    if ($AzureLastSignIn){
-        $LastNonInteractiveSignInDateTime = $AzureLastSignIn.LastNonInteractiveSignInDateTime
-        $LastSignInDateTime = $AzureLastSignIn.LastSignInDateTime
-        # Dates pulled from the API are UTC time, so they must be converted to the local time set on the endpoint the script is running in (e.g., EST)
-        if ($LastNonInteractiveSignInDateTime){
-            $AzureLastNonInteractiveSignInDateTime = $LastNonInteractiveSignInDateTime.ToLocalTime()
-        }
-        if ($LastSignInDateTime){
-            $AzureLastSignInDateTime = $LastSignInDateTime.ToLocalTime()
-        }
-    }
-    $ActivityResults += New-Object psobject -Property @{
-        "UPN" = $UPN
-        "GivenName" = $GivenName
-        "Surname" = $Surname
-        "EmployeeID" = $EmployeeID
-        "LocalADDescription" = $Description
-        "LocalADLastLogonDate" = $LastLogonDate
-        "ADAccountEnabled" = $Enabled
+    $Username = $ADUsers.SamAccountName
+    $Email = $ADUsers.Email
+    $TempPassword = "[TEMP_PASSWORD]"
+    $PasswordExpired = $ADUsers.PasswordExpired
+    $PasswordLastSet = $ADUsers.PasswordLastSet
+    $LastLogonDate = $ADUsers.LastLogonDate
+
+    $AzureLastSignDateTime = (Get-MgUser -Filter "startswith(UserPrincipalName, '$Email')" -Select SignInActivity | Select-Object -ExpandProperty SignInActivity).LastSignInDateTime
+
+    $ADUserssActivitiesResults += New-Object psobject -Property @{
+        "Username" = $Username
         "PasswordExpired" = $PasswordExpired
-        "DistinguishedName" = $DistinguishedName
-        "LocalADPasswordLastSet" = $PasswordLastSet
-        "SamAccountName" = $SamAccountName
-        "EOLLastInteractionTime" = $EOLLastInteractionTime
-        "EOLLastLogonTime" = $EOLLastLogonTime
-        "EOLLastUserAccessTime" = $EOLLastUserAccessTime
-        "EOLLastUserActionTime" = $EOLLastUserActionTime
-        "AzureLastNonInteractiveSignInDateTime" = $AzureLastNonInteractiveSignInDateTime
-        "AzureLastSignInDateTime" = $AzureLastSignInDateTime
+        "PasswordLastSet" = $PasswordLastSet
+        "LastLocalADLogonDate" = $LastLogonDate
+        "AzureLastSignInDateTime" = $AzureLastSignDateTime
     }
-    $Total++
 }
-$Date = Get-Date -Format "MMddyyyy"
-$ActivityResults | Export-Csv -Path ADAccountActivity_$Date.csv -NoTypeInformation
+
+$Date = Get-Date -Format "MMddyyyy_Hmms"
+$ExportPath = "ActivityResults_$Date.csv"
+$ADUserssActivitiesResults | Export-Csv -Path $ExportPath -NoTypeInformation
